@@ -2,6 +2,7 @@
 set -Eeuo pipefail
 
 PACKAGE="agenix"
+SECRETS_FILE="secrets.nix"
 
 function show_help () {
   echo "$PACKAGE - edit and rekey age secret files"
@@ -27,7 +28,7 @@ function show_help () {
   echo 'If STDIN is not interactive, EDITOR will be set to "cp /dev/stdin"'
   echo ' '
   echo 'RULES environment variable with path to Nix file specifying recipient public keys.'
-  echo "Defaults to './secrets.nix'"
+  echo "If not set, agenix will first check for '$SECRETS_FILE' in the current directory and then each parent directory."
   echo ' '
   echo "agenix version: @version@"
   echo "age binary path: @ageBin@"
@@ -101,7 +102,29 @@ while test $# -gt 0; do
   esac
 done
 
-RULES=${RULES:-./secrets.nix}
+RULES=${RULES:-}
+# FILE path relative to the rules file, only for verifying rules
+FILE_REL=$FILE
+if [ -z "$RULES" ]; then
+  if [ -f "./$SECRETS_FILE" ]; then
+    RULES="./$SECRETS_FILE"
+  else
+    parentDir=$(dirname "$(realpath "$FILE")")
+    while [ "$parentDir" != "/" ]; do
+      if [ -f "$parentDir/$SECRETS_FILE" ]; then
+        RULES="$parentDir/$SECRETS_FILE"
+        FILE_REL=$(realpath --relative-to="$parentDir" "$FILE")
+        break
+      else
+        parentDir=$(dirname "$parentDir")
+      fi
+    done
+    if [ -z "$RULES" ]; then
+      err "Could not find $SECRETS_FILE in parent directories of $FILE."
+    fi
+  fi
+fi
+
 function cleanup {
     if [ -n "${CLEARTEXT_DIR+x}" ]
     then
@@ -123,7 +146,7 @@ function decrypt {
     KEYS=$2
     if [ -z "$KEYS" ]
     then
-        err "There is no rule for $FILE in $RULES."
+        err "There is no rule for $FILE_REL in $RULES."
     fi
 
     if [ -f "$FILE" ]
@@ -147,7 +170,7 @@ function decrypt {
 
 function edit {
     FILE=$1
-    KEYS=$(keys "$FILE") || exit 1
+    KEYS=$(keys "$FILE_REL") || exit 1
 
     CLEARTEXT_DIR=$(@mktempBin@ -d)
     CLEARTEXT_FILE="$CLEARTEXT_DIR/$(basename "$FILE")"
@@ -200,5 +223,5 @@ function rekey {
 }
 
 [ $REKEY -eq 1 ] && rekey && exit 0
-[ $DECRYPT_ONLY -eq 1 ] && DEFAULT_DECRYPT+=("-o" "-") && decrypt "${FILE}" "$(keys "$FILE")" && exit 0
+[ $DECRYPT_ONLY -eq 1 ] && DEFAULT_DECRYPT+=("-o" "-") && decrypt "${FILE}" "$(keys "$FILE_REL")" && exit 0
 edit "$FILE" && cleanup && exit 0
