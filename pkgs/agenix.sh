@@ -138,16 +138,30 @@ function cleanup {
 trap "cleanup" 0 2 3 15
 
 function keys {
-    (@nixInstantiate@ --json --eval --strict -E "(let rules = import $RULES; in rules.\"$1\".publicKeys)" | @jqBin@ -r .[]) || exit 1
+    local FILE_REL="$1"
+    local ruleAttr=$FILE_REL
+
+    # check if RULES contains an attr for the file or its parent directories (up to the dir RULES is in)
+    local ruleFound=1
+    while [ "$(@nixInstantiate@ --eval --strict -E "builtins.hasAttr \"$ruleAttr\" (import $RULES)")" != "true" ]; do
+      if [[ $ruleAttr =~ "/" ]]; then
+        ruleAttr="${ruleAttr%\/*}"
+      else
+        ruleFound=0
+        break
+      fi
+    done
+
+    if [ $ruleFound -ne 1 ]; then
+      err "There is no rule for $FILE_REL or its parents in $RULES."
+    fi
+
+    (@nixInstantiate@ --json --eval --strict -E "(let rules = import $RULES; in rules.\"$ruleAttr\".publicKeys)" | @jqBin@ -r .[]) || exit 1
 }
 
 function decrypt {
     FILE=$1
-    KEYS=$2
-    if [ -z "$KEYS" ]
-    then
-        err "There is no rule for $FILE_REL in $RULES."
-    fi
+    KEYS=$(keys "$FILE_REL") || exit 1
 
     if [ -f "$FILE" ]
     then
@@ -223,5 +237,5 @@ function rekey {
 }
 
 [ $REKEY -eq 1 ] && rekey && exit 0
-[ $DECRYPT_ONLY -eq 1 ] && DEFAULT_DECRYPT+=("-o" "-") && decrypt "${FILE}" "$(keys "$FILE_REL")" && exit 0
+[ $DECRYPT_ONLY -eq 1 ] && DEFAULT_DECRYPT+=("-o" "-") && decrypt "$FILE" && exit 0
 edit "$FILE" && cleanup && exit 0
