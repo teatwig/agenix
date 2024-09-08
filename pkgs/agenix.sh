@@ -16,6 +16,7 @@ function show_help () {
   echo '-e, --edit FILE           edits FILE using $EDITOR'
   echo '-r, --rekey               re-encrypts all secrets with specified recipients'
   echo '-d, --decrypt FILE        decrypts FILE to STDOUT'
+  echo '-c, --convert FILE        encrypts FILE as FILE.age'
   echo '-i, --identity            identity to use when decrypting'
   echo '-v, --verbose             verbose output'
   echo ' '
@@ -49,6 +50,7 @@ test $# -eq 0 && (show_help && exit 1)
 REKEY=0
 DECRYPT_ONLY=0
 DEFAULT_DECRYPT=(--decrypt)
+CONVERT_ONLY=0
 
 while test $# -gt 0; do
   case "$1" in
@@ -83,6 +85,17 @@ while test $# -gt 0; do
     -d|--decrypt)
       shift
       DECRYPT_ONLY=1
+      if test $# -gt 0; then
+        export FILE=$1
+      else
+        echo "no FILE specified"
+        exit 1
+      fi
+      shift
+      ;;
+    -c|--convert)
+      shift
+      CONVERT_ONLY=1
       if test $# -gt 0; then
         export FILE=$1
       else
@@ -225,6 +238,30 @@ function edit {
     mv -f "$REENCRYPTED_FILE" "$FILE"
 }
 
+function convert {
+    local FILE=$1
+    local KEYS
+    KEYS=$(keys "$FILE_REL") || exit 1
+
+    if [ ! -f "$FILE" ]
+    then
+      warn "$FILE doesn't exist."
+      return
+    fi
+
+    ENCRYPT=()
+    while IFS= read -r key
+    do
+        if [ -n "$key" ]; then
+            ENCRYPT+=(--recipient "$key")
+        fi
+    done <<< "$KEYS"
+
+    ENCRYPT+=(-o "${FILE}.age")
+
+    @ageBin@ "${ENCRYPT[@]}" "$FILE" || exit 1
+}
+
 function rekey {
     FILES=$( (@nixInstantiate@ --json --eval -E "(let rules = import $RULES; in builtins.attrNames rules)"  | @jqBin@ -r .[]) || exit 1)
 
@@ -237,5 +274,6 @@ function rekey {
 }
 
 [ $REKEY -eq 1 ] && rekey && exit 0
+[ $CONVERT_ONLY -eq 1 ] && convert "$FILE" && exit 0
 [ $DECRYPT_ONLY -eq 1 ] && DEFAULT_DECRYPT+=("-o" "-") && decrypt "$FILE" && exit 0
 edit "$FILE" && cleanup && exit 0
