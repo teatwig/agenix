@@ -29,7 +29,7 @@ with lib; let
         mount -t ramfs none "${cfg.secretsMountPoint}" -o nodev,nosuid,mode=0751
     '';
   newGeneration = ''
-    _agenix_generation="$(basename "$(readlink ${cfg.secretsDir})" || echo 0)"
+    _agenix_generation="$(basename "$(readlink "${cfg.secretsDir}" || echo 0)")"
     (( ++_agenix_generation ))
     echo "[agenix] creating new generation in ${cfg.secretsMountPoint}/$_agenix_generation"
     mkdir -p "${cfg.secretsMountPoint}"
