@@ -28,9 +28,11 @@ with lib; let
       grep -q "${cfg.secretsMountPoint} ramfs" /proc/mounts ||
         mount -t ramfs none "${cfg.secretsMountPoint}" -o nodev,nosuid,mode=0751
     '';
+  # `basename ""` (empty quotes in case readLink fails) always exits with 0, which means the "echo 0" is never called
+  # this is an issue in the original agenix, but doesn't matter since the line after immediately increments it, and `(( ++emptyVal ))` works as if emptyVal was 0
   newGeneration = ''
-    _agenix_generation="$(basename "$(readlink "${cfg.secretsDir}" || echo 0)")"
-    (( ++_agenix_generation ))
+    _prev_generation="$(basename "$(readlink "${cfg.secretsDir}" || echo 0)")"
+    _agenix_generation=$(( _prev_generation + 1 ))
     echo "[agenix] creating new generation in ${cfg.secretsMountPoint}/$_agenix_generation"
     mkdir -p "${cfg.secretsMountPoint}"
     chmod 0751 "${cfg.secretsMountPoint}"
@@ -52,18 +54,32 @@ with lib; let
   setTruePath = secretType: ''
     ${
       if secretType.symlink
+      # question: do we just inherit $_agenix_generation from newGeneration despite it being a separate activation script?
+      # looks like it...
       then ''
         _truePath="${cfg.secretsMountPoint}/$_agenix_generation/${secretType.name}"
+        _prevTruePath="${cfg.secretsMountPoint}/$_prev_generation/${secretType.name}"
       ''
       else ''
         _truePath="${secretType.path}"
+        _prevTruePath="${secretType.path}"
       ''
     }
   '';
 
-  installSecret = secretType: ''
-    ${setTruePath secretType}
-    echo "decrypting '${secretType.file}' to '$_truePath'..."
+  # empty if either file doesn't exist
+  setHash = file: truePath: let
+    hashFiles = files:
+      lib.concatMapStrings (f: ''$(md5sum "${f}" 2>/dev/null | cut -d' ' -f1)'') files;
+  in ''
+    _hash=""
+    if [ -f "${file}" ] && [ -f "${truePath}" ]; then
+      _hash="${hashFiles [ file truePath ]}"
+    fi
+  '';
+
+  decryptToNewGeneration = secretType: ''
+    echo "[agenix] decrypting '${secretType.file}' to '$_truePath'..."
     TMP_FILE="$_truePath.tmp"
 
     IDENTITIES=()
@@ -86,10 +102,36 @@ with lib; let
     )
     chmod ${secretType.mode} "$TMP_FILE"
     mv -f "$TMP_FILE" "$_truePath"
+  '';
+
+  # other interesting question: since the files are in ramfs and get generated on activation, does it ask for the ssh passphrase after reboot?
+  installSecret = secretType: ''
+    ${setTruePath secretType}
+    ${setHash secretType.file "$_prevTruePath"}
+
+    # if the file contains the hash it automatically means both encrypted and decrypted file must exist
+    # (unless someone tampered with the hash list to only contain single file hashes, we'll ignore this for now but should maybe verify the hash length as well)
+    # it might make sense to put the hash list in /var/lib/agenix so at least symlink=false files don't have to be decrypted again (if they aren't on ramfs)
+    if [ -n "$_hash" ] && (grep -q -x -F "$_hash" "${cfg.secretsMountPoint}/hashes-$_prev_generation"); then
+      ${if secretType.symlink then ''
+        # no -f because the file SHOULD NOT exist (since we ignore symlink=false)
+        echo "[agenix] copying unchanged decrypted file from '$_prevTruePath' to '$_truePath'"
+        cp "$_prevTruePath" "$_truePath"
+      '' else ''
+        echo "[agenix] keeping unchanged decrypted file: $_truePath"
+      ''}
+    else
+      ${decryptToNewGeneration secretType}
+      ${setHash secretType.file "$_truePath"}
+    fi
 
     ${optionalString secretType.symlink ''
       [ "${secretType.path}" != "${cfg.secretsDir}/${secretType.name}" ] && ln -sfT "${cfg.secretsDir}/${secretType.name}" "${secretType.path}"
     ''}
+
+    if [ -n "$_hash" ]; then
+      echo "$_hash" >> "${cfg.secretsMountPoint}/hashes-$_agenix_generation"
+    fi
   '';
 
   testIdentities =
@@ -100,14 +142,13 @@ with lib; let
     cfg.identityPaths;
 
   cleanupAndLink = ''
-    _agenix_generation="$(basename "$(readlink ${cfg.secretsDir})" || echo 0)"
-    (( ++_agenix_generation ))
     echo "[agenix] symlinking new secrets to ${cfg.secretsDir} (generation $_agenix_generation)..."
     ln -sfT "${cfg.secretsMountPoint}/$_agenix_generation" ${cfg.secretsDir}
 
     (( _agenix_generation > 1 )) && {
-    echo "[agenix] removing old secrets (generation $(( _agenix_generation - 1 )))..."
-    rm -rf "${cfg.secretsMountPoint}/$(( _agenix_generation - 1 ))"
+      echo "[agenix] removing old secrets (generation $_prev_generation)..."
+      rm -rf "${cfg.secretsMountPoint}/$_prev_generation"
+      rm -rf "${cfg.secretsMountPoint}/hashes-$_prev_generation"
     }
   '';
 
